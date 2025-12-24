@@ -76,8 +76,6 @@ HTML_HEADER = """<!DOCTYPE html>
         }}
         .toc ul {{
             list-style: none;
-            column-count: 3;
-            column-gap: 24px;
         }}
         .toc li {{
             margin-bottom: 4px;
@@ -96,12 +94,14 @@ HTML_HEADER = """<!DOCTYPE html>
             margin-bottom: 24px;
         }}
         .file-header {{
-            font-size: 12px;
-            font-weight: normal;
-            color: #333;
-            padding: 4px 8px;
-            border-bottom: 1px solid #ddd;
-            background: #f8f8f8;
+            font-size: 14px;
+            font-weight: bold;
+            color: #000;
+            padding: 8px 12px;
+            border-bottom: 1px solid #ccc;
+            background: #e0e0e0;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
         }}
         .highlight {{
             background: #fff;
@@ -152,8 +152,10 @@ HTML_HEADER = """<!DOCTYPE html>
                 page-break-before: avoid;
             }}
             .file-header {{
-                padding: 2px 4px;
-                border-bottom: 1px solid #ccc;
+                font-size: 12px;
+                padding: 6px 8px;
+                background: #d0d0d0;
+                border-bottom: 2px solid #999;
             }}
             .linenos {{
                 padding: 0 4px 0 2px;
@@ -164,7 +166,11 @@ HTML_HEADER = """<!DOCTYPE html>
         }}
         
         @page {{
-            margin: 0.5cm;
+            size: A4;
+            margin: 0.7cm 0.7cm 1.5cm 0.7cm;
+            @bottom-center {{
+                content: counter(page);
+            }}
         }}
         
         {pygments_css}
@@ -354,7 +360,7 @@ def generate_toc(files: list[Path], base_dir: Path) -> str:
         items.append(f'<li><a href="#file-{i}">{display_name}</a></li>')
     
     return f'''<div class="toc">
-    <h2>Files ({len(files)})</h2>
+    <h2>Table of Contents</h2>
     <ul>
         {"".join(items)}
     </ul>
