@@ -3,10 +3,16 @@
 src2html - Convert source code files to syntax-highlighted HTML.
 
 Usage:
-    python src2html.py <source_file> [--output <output.html>] [--open]
+    Single file:
+        python src2html.py <source_file> [--output <output.html>] [--open]
+    
+    Directory (multi-file):
+        python src2html.py <directory> [--not-match-f=<pattern>] [--exclude-ext=<ext>] [--output <output.html>] [--open]
 """
 
 import argparse
+import fnmatch
+import re
 import subprocess
 import sys
 import webbrowser
@@ -21,7 +27,21 @@ except ImportError:
     PYGMENTS_AVAILABLE = False
 
 
-HTML_TEMPLATE = """<!DOCTYPE html>
+# Common source file extensions to include
+SOURCE_EXTENSIONS = {
+    'py', 'js', 'ts', 'jsx', 'tsx', 'c', 'cc', 'cpp', 'h', 'hpp',
+    'java', 'go', 'rs', 'rb', 'php', 'swift', 'kt', 'scala',
+    'sh', 'bash', 'zsh', 'fish', 'ps1',
+    'html', 'css', 'scss', 'sass', 'less',
+    'json', 'yaml', 'yml', 'toml', 'xml',
+    'sql', 'md', 'rst', 'txt',
+    'lua', 'r', 'pl', 'pm', 'hs', 'ml', 'ex', 'exs',
+    'vue', 'svelte', 'astro',
+    'dockerfile', 'makefile', 'cmake',
+}
+
+
+HTML_HEADER = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -41,7 +61,41 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #000;
             padding-left: 16px;
         }}
-        .header {{
+        
+        /* Table of Contents */
+        .toc {{
+            padding: 16px;
+            background: #f8f8f8;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 16px;
+        }}
+        .toc h2 {{
+            font-size: 14px;
+            margin-bottom: 8px;
+            color: #333;
+        }}
+        .toc ul {{
+            list-style: none;
+            column-count: 3;
+            column-gap: 24px;
+        }}
+        .toc li {{
+            margin-bottom: 4px;
+        }}
+        .toc a {{
+            color: #0066cc;
+            text-decoration: none;
+            font-size: 12px;
+        }}
+        .toc a:hover {{
+            text-decoration: underline;
+        }}
+        
+        /* File sections */
+        .file-section {{
+            margin-bottom: 24px;
+        }}
+        .file-header {{
             font-size: 12px;
             font-weight: normal;
             color: #333;
@@ -86,8 +140,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         @media print {{
             body {{
                 font-size: 10px;
+                padding-left: 0;
             }}
-            .header {{
+            .toc {{
+                page-break-after: always;
+            }}
+            .file-section {{
+                page-break-before: always;
+            }}
+            .file-section:first-of-type {{
+                page-break-before: avoid;
+            }}
+            .file-header {{
                 padding: 2px 4px;
                 border-bottom: 1px solid #ccc;
             }}
@@ -107,9 +171,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <div class="header">{title}</div>
-    {code_html}
-</body>
+"""
+
+HTML_FOOTER = """</body>
 </html>
 """
 
@@ -175,68 +239,249 @@ CATPPUCCIN_CSS = """
 """
 
 
-def highlight_with_pygments(code: str, filename: str) -> str:
+def collect_files(directory: Path, not_match_patterns: list[str], exclude_extensions: list[str]) -> list[Path]:
+    """
+    Recursively collect source files from a directory, applying filters.
+    
+    Args:
+        directory: The directory to scan
+        not_match_patterns: Patterns to exclude from filenames (substring match)
+        exclude_extensions: File extensions to exclude (without dot)
+    
+    Returns:
+        Sorted list of file paths
+    """
+    # Directories to always ignore
+    ignored_dirs = {
+        'venv', '.venv', 'env', '.env',
+        'node_modules', 
+        '__pycache__', '.pytest_cache', '.mypy_cache',
+        '.git', '.svn', '.hg',
+        'dist', 'build', '.build',
+        'target',  # Rust/Java
+        'vendor',  # Go/PHP
+    }
+    
+    files = []
+    exclude_ext_set = {ext.lower().lstrip('.') for ext in exclude_extensions}
+    
+    for file_path in directory.rglob('*'):
+        if not file_path.is_file():
+            continue
+        
+        # Skip hidden files and directories
+        if any(part.startswith('.') for part in file_path.parts):
+            continue
+        
+        # Skip ignored directories
+        if any(part in ignored_dirs for part in file_path.parts):
+            continue
+        
+        # Get extension (handle files like Makefile, Dockerfile)
+        ext = file_path.suffix.lower().lstrip('.')
+        if not ext:
+            # Check if it's a known extensionless file
+            name_lower = file_path.name.lower()
+            if name_lower in ('makefile', 'dockerfile', 'rakefile', 'gemfile'):
+                ext = name_lower
+            else:
+                continue
+        
+        # Check if extension is in our source file list
+        if ext not in SOURCE_EXTENSIONS:
+            continue
+        
+        # Apply extension exclusion
+        if ext in exclude_ext_set:
+            continue
+        
+        # Apply filename pattern exclusion
+        filename = file_path.name
+        if any(pattern in filename for pattern in not_match_patterns):
+            continue
+        
+        files.append(file_path)
+    
+    # Sort alphabetically by relative path
+    files.sort(key=lambda p: str(p.relative_to(directory)).lower())
+    
+    return files
+
+
+def highlight_with_pygments(code: str, filename: str, anchor_prefix: str = "line") -> str:
     """Use Pygments to syntax highlight the code."""
     try:
         lexer = get_lexer_for_filename(filename)
     except:
         lexer = guess_lexer(code)
     
-    formatter = HtmlFormatter(linenos=True, cssclass="highlight", lineanchors="line")
+    formatter = HtmlFormatter(linenos=True, cssclass="highlight", lineanchors=anchor_prefix)
     return highlight(code, lexer, formatter)
 
 
-def generate_html(source_path: Path) -> str:
-    """Generate HTML from a source file."""
+def generate_file_section(file_path: Path, file_index: int, base_dir: Path = None) -> str:
+    """Generate HTML for a single file section."""
+    code = file_path.read_text()
+    
+    # Use relative path for display if base_dir provided
+    if base_dir:
+        display_name = str(file_path.relative_to(base_dir))
+    else:
+        display_name = file_path.name
+    
+    # Generate syntax-highlighted code with unique anchor prefix
+    anchor_prefix = f"file{file_index}-line"
+    
+    if PYGMENTS_AVAILABLE:
+        code_html = highlight_with_pygments(code, file_path.name, anchor_prefix)
+    else:
+        import html
+        escaped = html.escape(code)
+        code_html = f'<div class="highlight"><pre><code>{escaped}</code></pre></div>'
+    
+    return f'''<div class="file-section" id="file-{file_index}">
+    <div class="file-header">{display_name}</div>
+    {code_html}
+</div>
+'''
+
+
+def generate_toc(files: list[Path], base_dir: Path) -> str:
+    """Generate table of contents HTML."""
+    items = []
+    for i, file_path in enumerate(files):
+        display_name = str(file_path.relative_to(base_dir))
+        items.append(f'<li><a href="#file-{i}">{display_name}</a></li>')
+    
+    return f'''<div class="toc">
+    <h2>Files ({len(files)})</h2>
+    <ul>
+        {"".join(items)}
+    </ul>
+</div>
+'''
+
+
+def generate_single_html(source_path: Path) -> str:
+    """Generate HTML from a single source file (original behavior)."""
     code = source_path.read_text()
     
     if PYGMENTS_AVAILABLE:
         code_html = highlight_with_pygments(code, source_path.name)
     else:
-        # Fallback: just wrap in pre/code tags
         import html
         escaped = html.escape(code)
         code_html = f'<div class="highlight"><pre><code>{escaped}</code></pre></div>'
     
-    return HTML_TEMPLATE.format(
+    html_content = HTML_HEADER.format(
         title=source_path.name,
-        pygments_css=CATPPUCCIN_CSS,
-        code_html=code_html
+        pygments_css=CATPPUCCIN_CSS
     )
+    html_content += f'<div class="file-header">{source_path.name}</div>\n'
+    html_content += code_html
+    html_content += HTML_FOOTER
+    
+    return html_content
+
+
+def generate_multi_html(files: list[Path], base_dir: Path, title: str) -> str:
+    """Generate HTML from multiple source files."""
+    html_content = HTML_HEADER.format(
+        title=title,
+        pygments_css=CATPPUCCIN_CSS
+    )
+    
+    # Add table of contents
+    html_content += generate_toc(files, base_dir)
+    
+    # Add each file section
+    for i, file_path in enumerate(files):
+        html_content += generate_file_section(file_path, i, base_dir)
+    
+    html_content += HTML_FOOTER
+    
+    return html_content
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Convert source code to syntax-highlighted HTML"
     )
-    parser.add_argument("source", help="Source file to convert")
+    parser.add_argument("source", help="Source file or directory to convert")
     parser.add_argument(
         "-o", "--output", 
-        help="Output HTML file (default: <source>.html)"
+        help="Output HTML file (default: <source>.html or bundle.html for directories)"
     )
     parser.add_argument(
         "--open", 
         action="store_true",
         help="Open the result in the default browser"
     )
+    parser.add_argument(
+        "--not-match-f",
+        dest="not_match_f",
+        action="append",
+        default=[],
+        help="Exclude files containing this pattern in filename (can be used multiple times)"
+    )
+    parser.add_argument(
+        "--exclude-ext",
+        dest="exclude_ext",
+        action="append",
+        default=[],
+        help="Exclude files with this extension (can be used multiple times)"
+    )
     
     args = parser.parse_args()
     
-    source_path = Path(args.source)
+    # Expand comma-separated values in filter options
+    def expand_comma_separated(items: list[str]) -> list[str]:
+        result = []
+        for item in items:
+            result.extend(part.strip() for part in item.split(',') if part.strip())
+        return result
+    
+    args.not_match_f = expand_comma_separated(args.not_match_f)
+    args.exclude_ext = expand_comma_separated(args.exclude_ext)
+    
+    source_path = Path(args.source).resolve()
+    
     if not source_path.exists():
-        print(f"Error: File '{source_path}' not found", file=sys.stderr)
+        print(f"Error: '{source_path}' not found", file=sys.stderr)
         sys.exit(1)
     
-    # Determine output path
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_path = source_path.with_suffix(".html")
+    if source_path.is_file():
+        # Single file mode (original behavior)
+        if args.output:
+            output_path = Path(args.output)
+        else:
+            output_path = source_path.with_suffix(".html")
+        
+        html_content = generate_single_html(source_path)
+        output_path.write_text(html_content)
+        print(f"✓ Generated: {output_path}")
     
-    # Generate and write HTML
-    html_content = generate_html(source_path)
-    output_path.write_text(html_content)
-    print(f"✓ Generated: {output_path}")
+    else:
+        # Directory mode (multi-file)
+        files = collect_files(source_path, args.not_match_f, args.exclude_ext)
+        
+        if not files:
+            print("Error: No source files found", file=sys.stderr)
+            sys.exit(1)
+        
+        print(f"Found {len(files)} files:")
+        for f in files:
+            print(f"  - {f.relative_to(source_path)}")
+        
+        if args.output:
+            output_path = Path(args.output)
+        else:
+            output_path = source_path / "bundle.html"
+        
+        title = f"{source_path.name} - Source Code"
+        html_content = generate_multi_html(files, source_path, title)
+        output_path.write_text(html_content)
+        print(f"✓ Generated: {output_path}")
     
     # Optionally open in browser
     if args.open:
